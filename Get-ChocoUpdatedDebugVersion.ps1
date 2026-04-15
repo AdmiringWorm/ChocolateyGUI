@@ -29,121 +29,38 @@ param(
     # Remove and clone the specified Chocolatey Source Location again.
     # This is a very destructive operation, and should only be used if
     # you are not interested in any local information.
-    [switch] $ForceChocoClone
+    [switch] $ForceChocoClone,
+
+    [switch] $NoBuild
 )
 
-function CheckoutTag {
-    param(
-        [Parameter(Mandatory)]
-        [string] $SourceLocation,
-
-        [string] $TagName
-    )
-  
-    Push-Location "$SourceLocation"
-    if (!$TagName) {
-        $TagName = . git tag --sort v:refname | Where-Object { $_ -match "^[\d\.]+$" } | Select-Object -last 1
-    }
-
-    if ($TagName) {
-        git checkout $TagName -q 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "Checked out Chocolatey CLI tag '$TagName'"
-        }
-        else {
-            $currentBranch = . git branch --show-current
-            if ($currentBranch) {
-                Write-Warning "Unable to check out tag $TagName. Leaving source in branch $currentBranch"
-            }
-            else {
-                Write-Warning "Unable to check out tag $TagName. Leaving source in commit $(git rev-parse HEAD)"
-            }
-        }
-    }
-
-    Pop-Location
+if ((-not (Get-Module ChocolateyDebugging)) -and (-not (Get-Module -ListAvailable ChocolateyDebugging))) {
+    throw "You don't have the ChocolateyDebugging module installed. Please run ``choco install chocolatey-debugging --source ops-choco-packages``"
 }
 
-Write-Host "We are at $PSScriptRoot"
+if (-not $ChocoSourceLocation) {
+    $ChocoSourceLocation = Find-ChocolateySourceLocation -RepositoryName choco
+}
 
-[xml]$packagesConfigFile = Get-Content -Path "$PSScriptRoot/Source/ChocolateyGui/packages.config"
+$GetChocolateyDebugBuildSplat = @{
+    PackageName = 'chocolatey.lib'
+    Path        = "$PSScriptRoot/Source/ChocolateyGui.Common"
+    SourcePath  = $ChocoSourceLocation
+    SourceRepo  = "https://github.com/chocolatey/choco"
+    ForceClone  = $ForceChocoClone
+    NoBuild     = $NoBuild
+}
 
-$chocolateyLibPackageVersion = $($packagesConfigFile.packages.package | Where-Object { $_.id -eq "chocolatey.lib" }).version
-
-if ($CheckoutRefTag) {
-
-    if ($chocolateyLibPackageVersion -match '^[\d\.]+$') {
-        $CheckoutTag = $chocolateyLibPackageVersion
+switch ($PSCmdlet.ParameterSetName) {
+    'tag' {
+        $GetChocolateyDebugBuildSplat.CheckoutTag = $CheckoutTag
     }
-    else {
-        $CheckoutLatestTag = $true
-  }
-}
-
-if (!$ChocoSourceLocation) {
-    # To allow a default path being used for cloning the repository
-    $ChocoSourceLocation = "$env:TEMP\chocoSource"
-}
-
-Write-Host "Looking for choco in '$ChocoSourceLocation'"
-
-if ($ForceChocoClone -and (Test-Path $ChocoSourceLocation)) {
-    Write-Host "Removing existing Chocolatey CLI Source in '$ChocoSourceLocation'"
-    # We use error action stop here, as there may be times the `.git` directory is locked.
-    # Having information about this is helpful to rectify the issue.
-    Remove-Item $ChocoSourceLocation -Recurse -Force -EA Stop
-}
-
-if (!(Test-Path $ChocoSourceLocation)) {
-    Write-Host "Cloning Chocolatey CLI Repository to '$ChocoSourceLocation'"
-    git clone "https://github.com/chocolatey/choco.git" "$ChocoSourceLocation"
-
-    if ($CheckoutLatestTag) {
-        CheckoutTag $ChocoSourceLocation
+    'latest' {
+        $GetChocolateyDebugBuildSplat.CheckoutLatestTag = $CheckoutLatestTag
     }
-    elseif ($CheckoutTag) {
-        CheckoutTag $ChocoSourceLocation -TagName $CheckoutTag
+    'ref-tag' {
+        $GetChocolateyDebugBuildSplat.CheckoutRefTag = $CheckoutRefTag
     }
 }
-elseif ($CheckoutLatestTag) {
-    CheckoutTag $ChocoSourceLocation
-}
-elseif ($CheckoutTag) {
-    CheckoutTag $ChocoSourceLocation -TagName $CheckoutTag
-}
 
-if (-not (Test-Path -Path $ChocoSourceLocation)) {
-    # We leave this here on purpose in case the cloning of the repository has failed.
-    throw "Location '$ChocoSourceLocation' not found; please rerun with the -ChocoSourceLocation parameter or set the CHOCO_SOURCE_LOCATION environment variable."
-}
-
-Write-Host "Restore packages on project first..."
-& ./build.debug.bat --target='Restore'
-
-Write-Host "Building choco at $ChocoSourceLocation with Debug..."
-
-Push-Location $ChocoSourceLocation
-if (Test-Path "recipe.cake") {
-    & ./build.debug.bat --target='Run-ILMerge' --shouldRunTests=false --shouldRunAnalyze=false
-}
-else {
-    & ./build.debug.bat
-}
-Pop-Location
-
-Write-Host "Copying chocolatey artifacts to current Chocolatey Package Version folder..."
-
-$chocolateyLibPackageFolder = "$PSScriptRoot/Source/packages/chocolatey.lib.$chocolateyLibPackageVersion/lib/net48"
-
-if (-not (Test-Path -Path $chocolateyLibPackageFolder)) {
-    New-Item -ItemType Directory -Path $chocolateyLibPackageFolder > $null
-}
-
-$codeDropLibs = "$ChocoSourceLocation/code_drop/temp/_PublishedLibs/chocolatey_merged"
-
-if (!(Test-Path $codeDropLibs)) {
-  $codeDropLibs = "$ChocoSourceLocation/code_drop/chocolatey/lib"
-}
-
-Write-Host "Copying chocolatey lib items from '$codeDropLibs/*' to '$chocolateyLibPackageFolder'."
-Copy-Item -Path "$codeDropLibs/*" -Destination "$chocolateyLibPackageFolder/" -Force
+Get-ChocolateyDebugBuild @GetChocolateyDebugBuildSplat
